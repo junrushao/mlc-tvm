@@ -1,4 +1,6 @@
 # pylint: disable=missing-docstring
+import os
+
 import numpy as np
 import tvm
 from tvm import tir
@@ -10,6 +12,15 @@ DTYPE = "float32"
 TARGET = tvm.target.Target("nvidia/geforce-rtx-3090-ti")
 
 
+@tvm.register_func
+def tvm_callback_cuda_postproc(code, target):
+    if not os.path.exists("tmp/"):
+        os.mkdir("tmp/")
+    with open("tmp/generated.cu", "w", encoding="utf-8") as f:
+        f.write(code)
+    return code
+
+
 # pylint: disable=invalid-name,too-few-public-methods
 @I.ir_module
 class MyModule:
@@ -18,8 +29,8 @@ class MyModule:
         T.func_attr({"global_symbol": "main", "tir.noalias": True})
         # M, N, K = T.int64(), T.int64(), T.int64()
         # M = T.int64()
-        # A = T.match_buffer(a, [M, K], dtype=DTYPE)
-        AT = T.match_buffer(a, [K, M], dtype=DTYPE)
+        A = T.match_buffer(a, [M, K], dtype=DTYPE)
+        # AT = T.match_buffer(a, [K, M], dtype=DTYPE)
         B = T.match_buffer(b, [K, N], dtype=DTYPE)
         C = T.match_buffer(c, [M, N], dtype=DTYPE)
 
@@ -28,87 +39,11 @@ class MyModule:
                 vi, vj, vk = T.axis.remap("SSR", [i, j, k])
                 with T.init():
                     C[vi, vj] = 0.0
-                # C[vi, vj] = C[vi, vj] + A[vi, vk] * B[vk, vj]
-                C[vi, vj] = C[vi, vj] + AT[vk, vi] * B[vk, vj]
+                C[vi, vj] = C[vi, vj] + A[vi, vk] * B[vk, vj]
+                # C[vi, vj] = C[vi, vj] + AT[vk, vi] * B[vk, vj]
 
 
 # fmt: off
-
-@I.ir_module
-class MyScript:
-    @T.prim_func
-    def main(A: T.Buffer((16384, 16384), "float32"), B: T.Buffer((16384, 16384), "float32"), C: T.Buffer((16384, 16384), "float32")):
-        T.func_attr({"global_symbol": "main", "tir.noalias": T.bool(True)})
-        # with T.block("root"):
-        C_local = T.alloc_buffer((16384, 16384), scope="local")
-        A_shared = T.alloc_buffer((16384, 16384), scope="shared")
-        B_shared = T.alloc_buffer((16384, 16384), scope="shared")
-        A_shared_local = T.alloc_buffer((128, 16), scope="local")
-        B_shared_local = T.alloc_buffer((16, 128), scope="local")
-        for i_0 in T.thread_binding(128, thread="blockIdx.x"):
-            for j_0 in T.thread_binding(128, thread="blockIdx.y"):
-                for j_1 in T.thread_binding(2, thread="vthread.y"):
-                    for i_1 in T.thread_binding(2, thread="vthread.x"):
-                        for j_2 in T.thread_binding(16, thread="threadIdx.y"):
-                            for i_2 in T.thread_binding(16, thread="threadIdx.x", annotations={"pragma_auto_unroll_max_step": 256, "pragma_unroll_explicit": 1}):
-                                for j_3_init, i_3_init in T.grid(4, 4):
-                                    with T.block("matmul_init"):
-                                        vi = T.axis.spatial(16384, i_0 * 128 + i_1 * 64 + i_2 * 4 + i_3_init)
-                                        vj = T.axis.spatial(16384, j_0 * 128 + j_1 * 64 + j_2 * 4 + j_3_init)
-                                        T.reads()
-                                        T.writes(C_local[vi, vj])
-                                        C_local[vi, vj] = T.float32(0)
-                                for k_0 in range(1024):
-                                    for ax0_1 in T.thread_binding(16, thread="threadIdx.y"):
-                                        for ax1_1 in T.thread_binding(16, thread="threadIdx.x"):
-                                            for ax0_0, ax1_0 in T.grid(8, 1):
-                                                for ax1_2 in T.vectorized(1):
-                                                    with T.block("A_shared"):
-                                                        v0 = T.axis.spatial(16384, i_0 * 128 + ax0_0 * 16 + ax0_1)
-                                                        v1 = T.axis.spatial(16384, k_0 * 16 + ax1_0 * 16 + ax1_1 + ax1_2)
-                                                        T.reads(A[v0, v1])
-                                                        T.writes(A_shared[v0, v1])
-                                                        A_shared[v0, v1] = A[v0, v1]
-                                    for ax0_1 in T.thread_binding(16, thread="threadIdx.y"):
-                                        for ax1_1 in T.thread_binding(16, thread="threadIdx.x"):
-                                            for ax0_0, ax1_0 in T.grid(1, 2):
-                                                for ax1_2 in T.vectorized(4):
-                                                    with T.block("B_shared"):
-                                                        v0 = T.axis.spatial(16384, k_0 * 16 + ax0_0 * 16 + ax0_1)
-                                                        v1 = T.axis.spatial(16384, j_0 * 128 + ax1_0 * 64 + ax1_1 * 4 + ax1_2)
-                                                        T.reads(B[v0, v1])
-                                                        T.writes(B_shared[v0, v1])
-                                                        B_shared[v0, v1] = B[v0, v1]
-                                    for k_1 in range(16):
-                                        for ax0 in T.vectorized(4):
-                                            with T.block("A_shared_local"):
-                                                v0 = T.axis.spatial(128, i_1 * 64 + i_2 * 4 + ax0)
-                                                v1 = T.axis.spatial(16, k_1)
-                                                T.reads(A_shared[i_0 * 128 + v0, k_0 * 16 + v1])
-                                                T.writes(A_shared_local[v0, v1])
-                                                A_shared_local[v0, v1] = A_shared[i_0 * 128 + v0, k_0 * 16 + v1]
-                                        for ax0 in T.vectorized(4):
-                                            with T.block("B_shared_local"):
-                                                v0 = T.axis.spatial(16, k_1)
-                                                v1 = T.axis.spatial(128, j_1 * 64 + j_2 * 4 + ax0)
-                                                T.reads(B_shared[k_0 * 16 + v0, j_0 * 128 + v1])
-                                                T.writes(B_shared_local[v0, v1])
-                                                B_shared_local[v0, v1] = B_shared[k_0 * 16 + v0, j_0 * 128 + v1]
-                                        for j_3, i_3 in T.grid(4, 4):
-                                            with T.block("matmul_update"):
-                                                vi = T.axis.spatial(16384, i_0 * 128 + i_1 * 64 + i_2 * 4 + i_3)
-                                                vj = T.axis.spatial(16384, j_0 * 128 + j_1 * 64 + j_2 * 4 + j_3)
-                                                vk = T.axis.reduce(16384, k_0 * 16 + k_1)
-                                                T.reads(C_local[vi, vj], A_shared_local[vi - i_0 * 128, vk - k_0 * 16], B_shared_local[vk - k_0 * 16, vj - j_0 * 128])
-                                                T.writes(C_local[vi, vj])
-                                                C_local[vi, vj] = C_local[vi, vj] + A_shared_local[vi - i_0 * 128, vk - k_0 * 16] * B_shared_local[vk - k_0 * 16, vj - j_0 * 128]
-                                for ax0, ax1 in T.grid(4, 4):
-                                    with T.block("C_local"):
-                                        v0 = T.axis.spatial(16384, i_0 * 128 + i_1 * 64 + i_2 * 4 + ax0)
-                                        v1 = T.axis.spatial(16384, j_0 * 128 + j_1 * 64 + j_2 * 4 + ax1)
-                                        T.reads(C_local[v0, v1])
-                                        T.writes(C[v0, v1])
-                                        C[v0, v1] = C_local[v0, v1]
 
 # fmt: on
 
@@ -154,11 +89,13 @@ def do_sch(sch: tir.Schedule):
     block_cl = sch.cache_write(matmul, 0, "local")
     sch.reverse_compute_at(block_cl, tx, preserve_unit_loops=True)
 
-    def _cooperative_fetch(index, vec_len):
+    def _cooperative_fetch(index, vec_len, transpose_shared):
         block = sch.cache_read(matmul, index, "shared")
+        if transpose_shared:
+            sch.transform_layout(block, ("write", 0), index_map=lambda x, y: (y, x))
         sch.compute_at(block, ko)
-
         x, y = sch.get_loops(block)[-2:]
+        print(sch.get(x).extent, sch.get(y).extent)
         _, ty, tx, vec = sch.split(
             sch.fuse(x, y),
             factors=[None, Block_Size_Y, Block_Size_X, vec_len],
@@ -172,8 +109,8 @@ def do_sch(sch: tir.Schedule):
         sch.compute_at(block, ki)
         sch.vectorize(sch.get_loops(block)[-1])
 
-    _cooperative_fetch(0, vec_len=VECTOR_SIZE)
-    _cooperative_fetch(1, vec_len=VECTOR_SIZE)
+    _cooperative_fetch(0, vec_len=VECTOR_SIZE, transpose_shared=True)
+    _cooperative_fetch(1, vec_len=VECTOR_SIZE, transpose_shared=False)
     _shared_to_local(0)
     _shared_to_local(1)
 
